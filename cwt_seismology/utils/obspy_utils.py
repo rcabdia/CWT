@@ -66,17 +66,7 @@ class ObspyUtil:
 
     @staticmethod
     def get_stations_from_stream(st: Stream):
-
-        stations = []
-
-        for tr in st:
-            station = tr.stats.station
-            if stations.count(station):
-                pass
-            else:
-                stations.append(station)
-
-        return stations
+        return list({tr.stats.station for tr in st})
 
     @staticmethod
     def coords2azbazinc(station_latitude, station_longitude, station_elevation, origin_latitude,
