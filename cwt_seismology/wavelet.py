@@ -3,14 +3,12 @@ from multiprocessing.dummy import Pool as ThreadPool
 
 import numpy as np
 import scipy
-from deprecated import deprecated
 from obspy import read, Trace, UTCDateTime
 from obspy.signal.filter import lowpass
 from scipy.signal import argrelextrema
 
-from isp.Exceptions import InvalidFile
-from isp.Structures.structures import TracerStats
-from isp.Utils import ObspyUtil, MseedUtil
+from cwt_seismology.Structures.structures import TracerStats
+from cwt_seismology.utils import MseedUtil, ObspyUtil
 
 
 class ConvolveWaveletBase:
@@ -51,10 +49,9 @@ class ConvolveWaveletBase:
             self.trace: Trace = data
         else:
             if not MseedUtil.is_valid_mseed(data):
-                raise InvalidFile("The file: {} is not a valid mseed.".format(data))
+                raise FileExistsError("The file: {} is not a valid mseed.".format(data))
             self.trace: Trace = read(data)[0]
             self.stats = ObspyUtil.get_stats(data)
-
 
         self._wmin = float(kwargs.get("wmin", 6.))
         self._wmax = float(kwargs.get("wmax", 6.))
@@ -371,151 +368,7 @@ class ConvolveWaveletBase:
         return sigmas * var
 
 
-@deprecated(reason="You should use ConvolveWaveletScipy")
 class ConvolveWavelet(ConvolveWaveletBase):
-    """
-    Class to apply wavelet convolution to a mseed file. The bank of atoms is computed at the class initialisation.
-        Examples
-        --------
-        cw = ConvolveWavelet(file_path)
-        convolve = cw.ccwt_ba_fast()
-    """
-
-    def __init__(self, data, **kwargs):
-        """
-        Class to apply wavelet convolution to a mseed file.
-        The bank of atoms is computed at the class initialisation.
-        :param data: Either the mseed file path or an obspy Tracer.
-        :keyword kwargs:
-        :keyword wmin: Minimum number of cycles. Default = 6.
-        :keyword wmax: Maximum number of cycles. Default = 6.
-        :keyword tt: Central frequency of the Morlet Wavelet. Default = 2.
-        :keyword fmin: Minimum frequency (in Hz). Default = 2.
-        :keyword fmax: Maximum frequency (in Hz). Default = 12.
-        :keyword nf: Number of logarithmically spaced frequencies between fmin and fmax. Default = 20.
-        :keyword use_rfft: True if it should use rfft instead of fft. Default = True.
-        :keyword decimate: True if it should try to decimate the trace. Default = False. The decimation
-            factor is equal to q = 0.4*SR/fmax. For SR=200Hz and fmax=40Hz, q=2. This will downsize the
-            sample rate to 100 Hz.
-        :raise TypeError: If file is not a valid mseed.
-        :example:
-        >>> cw = ConvolveWavelet(data)
-        >>> cw.setup_wavelet()
-        >>> cf = cw.cf_lowpass()
-        """
-
-        super(ConvolveWavelet, self).__init__(data, **kwargs)
-
-        self.__conv = None  # convolution of ba and data_fft
-        self.__n_conv = 0
-
-    def _setup_atoms(self):
-        super()._setup_atoms()
-        self._convolve_atoms()
-
-    # def __chop_data(self, delta_time, start_time: UTCDateTime, end_time: UTCDateTime):
-    #     total_time = (end_time - start_time) / 3600.
-    #     n = np.math.ceil(total_time / delta_time)
-    #
-    #     data_set = []
-    #     for h in range(n):
-    #         dt = h * 3600 * delta_time
-    #         dt2 = (h + 1) * 3600 * delta_time
-    #         data = self.__get_data_in_time(start_time + dt, start_time + dt2)
-    #         if data is not None:
-    #             self._npts = int(self.stats.Sampling_rate * delta_time * 3600) + 1
-    #             data = self.__pad_data(data, self._npts)
-    #             data_set.append(data)
-    #
-    #     return data_set
-
-    def _convolve_atoms(self, parallel=False):
-
-        # FFT parameters
-        n_kern = len(self._wtime)
-        self.__n_conv = 2 ** np.math.ceil(np.math.log2(self._npts + n_kern))
-
-        # loop over frequencies
-        array_size = self.__n_conv / 2 + 1 if self._use_rfft else self.__n_conv
-        self.__conv = np.zeros((int(self._nf), int(array_size)), dtype=np.complex64)
-        # FFT data
-        if self._use_rfft:
-            data_fft = np.fft.rfft(self._data, n=self.__n_conv)
-        else:
-            data_fft = np.fft.fft(self._data, n=self.__n_conv)
-
-        for ii, fi in enumerate(self._frex):
-            cmw = self.filter_win(fi, ii)
-            if self._use_rfft:
-                # Calculate the fft of the "atom"
-                cmw_fft = np.fft.rfft(cmw, self.__n_conv)
-            else:
-                cmw_fft = np.fft.fft(cmw, self.__n_conv)
-
-            # convolution of ba and data_fft.
-            self.__conv[ii, :] = np.multiply(cmw_fft, data_fft, dtype=np.complex64)
-
-    def __compute_cwt(self, data):
-        start = int(self._half_wave + 1)
-        end = self._npts + int(self._half_wave + 1)
-        if self._use_rfft:
-            cwt = np.fft.irfft(data)[start:end]
-        else:
-            cwt = np.fft.ifft(data, n=self.__n_conv)[start:end]
-        # subtract the mean value
-        cwt = cwt - np.mean(cwt, dtype=np.float32)
-        return cwt
-
-    def __cwt_ba(self, parallel=False):
-        """
-        Compute the time frequency or scalogram in time and frequency domain.
-        :param parallel: True if it should run in parallel. If the computer has only 1 core this will have no effect.
-        :return: The time frequency representation of the convolved waveform with the wavelet.
-            The type is a np.array.
-        """
-
-        n_proc = self.get_nproc()
-        if parallel and n_proc > 1:
-            # pool = ThreadPool(processes=n_proc)
-            # results = [pool.apply_async(self.__compute_cwt, args=(row,)) for row in m]
-            # tf = np.array([p.get() for p in results], copy=False, dtype=np.float32)
-            # pool.close()
-            with ThreadPool(n_proc) as pool:
-                tf = np.array(pool.map(self.__compute_cwt, self.__conv), copy=False, dtype=np.float32)
-
-        else:
-            tf = np.array([self.__compute_cwt(row) for row in self.__conv], copy=False, dtype=np.float32)
-
-        # release conv from memory.
-        self.__conv = None
-        del self.__conv
-
-        return tf
-
-    # def __ccwt_ba_multitread(self):
-    #     nproc = self.get_nproc()
-    #     nproc = min(nproc, len(self._data))
-    #
-    #     with ThreadPool(nproc) as pool:
-    #         ro = pool.map(self.__cwt_ba, self._data)
-    #
-    #     cwt = np.array([]).reshape(self._nf, 0)
-    #     for index, r in enumerate(ro):
-    #         cwt = np.concatenate((cwt, r), axis=1)
-    #
-    #     return cwt
-
-    def compute_tf(self, parallel=True):
-        """
-        Compute the convolved waveform with the wavelet from fmin to fmax.
-        :param parallel: Either or not it should run cwt in parallel. Default=True.
-        :return:
-        """
-        self._validate_data()
-        self._tf = self.__cwt_ba(parallel=parallel)
-
-
-class ConvolveWaveletScipy(ConvolveWaveletBase):
     """
     Class to apply wavelet convolution to a mseed file. The bank of atoms is computed at the class initialisation.
         Examples
